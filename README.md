@@ -7,3 +7,4 @@ CWB external-credential vault — **Spec A Sub-plan 2**. Custodian holds an org'
 ## Design
 
 - [Security, Key-Management & DR Design](docs/2026-06-07-custodian-security-design.md) — the crypto/DR contract custodian must satisfy: escrowed root → per-org derived keys, crypto-enforced no-cross-sharing, encrypted-DB at rest, derive-don't-store, and the invariant that *nothing uses the root directly — only derived keys*.
+- [Satchel — Operator Credential On-Ramp](docs/2026-06-10-satchel-credential-onramp-design.md) — the human edge that feeds custodian: a pass-patterned, casket-encrypted, git-on-cairn file-per-secret store; `cw cred` CLI + thin capture clients (browser, Raycast, QR-for-TOTP); move-semantics ingest into the vault.
