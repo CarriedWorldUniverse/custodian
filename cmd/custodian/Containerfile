@@ -1,0 +1,24 @@
+# custodian container — tiny static Go binary on scratch.
+# Build from the custodian repo root:
+#   podman build -f cmd/custodian/Containerfile -t custodian:dev .
+#   podman save custodian:dev | sudo k3s ctr images import -
+#
+# custodian's sqlite backend is the pure-Go ncruces/go-sqlite3 (WASM), so the
+# binary builds with CGO_ENABLED=0 and runs on scratch — no libc needed.
+#
+# Runtime config via env (see cmd/custodian/main.go):
+#   CUSTODIAN_GRPC_ADDR, CUSTODIAN_DB, CUSTODIAN_ORG_SEED,
+#   CUSTODIAN_TLS_CERT, CUSTODIAN_TLS_KEY, CUSTODIAN_TLS_CA, CUSTODIAN_DEV_INSECURE
+FROM docker.io/library/golang:1.26 AS build
+ENV GOTOOLCHAIN=auto
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/custodian ./cmd/custodian
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/custodian /custodian
+EXPOSE 8085
+ENTRYPOINT ["/custodian"]
