@@ -1,6 +1,6 @@
 # Satchel — Operator Credential On-Ramp (pass-patterned, casket-encrypted)
 
-> **Status:** reference design (not yet built). Companion to the [custodian security design](2026-06-07-custodian-security-design.md): custodian is the vault and broker; **satchel is the human edge** — how credentials get *into* the platform, and where the operator's personal-tier secrets live. Working name `satchel` (a small bag one carries — sibling to porter, *one who carries*).
+> **Status:** **approved** (operator, 2026-06-11) — build begins at M1. Companion to the [custodian security design](2026-06-07-custodian-security-design.md): custodian is the vault and broker; **satchel is the human edge** — how credentials get *into* the platform, and where the operator's personal-tier secrets live. Working name `satchel` (a small bag one carries — sibling to porter, *one who carries*).
 
 ## 1. Purpose
 
@@ -36,6 +36,18 @@ Precedent for swapping the crypto out from under the pass layout: `passage` (pas
 
 **Cost:** we forfeit the ready-made GPG client ecosystem and own thin clients ourselves (§6). That is the explicit trade the operator chose; the mitigation is keeping clients thin by reusing the ecosystem's *protocols* (browserpass native-messaging) rather than its crypto.
 
+### 3.1 Key custody model (operator decision, 2026-06-11)
+
+The custody question is settled — keys form one herald-rooted tree, and the human's protection is *time*, not carried material:
+
+1. **Org base key** — custodian mints it at org creation, **derived from the org's herald base key**. One derivation tree; no second root.
+2. **Per-user keys** — each member's key is either **derived from the org key** or **the user's own enrolled key**; which mode applies is an **org-admin policy option**.
+3. **Session-based activation** — a human's personal key never sits open: it activates a **session** (TTL is an **org-admin knob, default 2 minutes**) — enough to use a credential — then auto-locks. Ephemeral capability, no long-held decryption state. Agent use stays on the brokered, use-audited custodian path; sessions gate *human* activation.
+4. **OTP in-session** — sessions support OTP: TOTP codes are minted at use-time inside the window (the brokered-2FA goal); seeds are never exposed raw.
+5. **Unlock prompting** — when a brokered use needs human activation, custodian doesn't fail: it **prompts the operator** (riding the existing broker escalation/notify seam → agora/panel/push) with *who* needs *what* credential for *what* use. Approval = session activation → the use proceeds. Pending requests carry their own timeout; approval is scoped to the requesting use (the session exists to serve it, not as an open window anything can ride); every prompt and decision is a ledger event.
+
+This also resolves the herald-bootstrap custody question: agent identities derive from the **org root** (platform-side), with human sessions gating sensitive operations — no human-carried seed.
+
 ## 4. Store format
 
 ```
@@ -62,7 +74,7 @@ satchel/                          ← git repo, hosted on cairn (private)
 
 - **Multi-recipient envelope** — the one casket capability to add: per-entry DEK, AEAD-sealed body under the DEK, DEK wrapped to each recipient's ECDH public key (age-style). casket-go already has the parts (ECDH shared-key derivation, `Seal`/`Open` AEAD); satchel needs them composed into a recipient-set envelope, in casket (shared primitive), not in satchel.
 - **`.recipients`** applies to its subtree, nearest-ancestor wins (pass `.gpg-id` semantics). Changing a recipient set re-seals the subtree (`cw cred recipients` does this), exactly as `pass init -p` re-encrypts.
-- **Operator keys are per-device** (little-blue, dMon, phone-later), so a device is revocable by re-sealing without rotating the operator's whole identity. Device keys derive herald-rooted (`DeriveAgentKey(owner_seed, "satchel/<device>")`) or are enrolled raw keys — follows the owner-seed-custody decision (open in the security design), doesn't block the format.
+- **Operator keys are per-device** (little-blue, dMon, phone-later), so a device is revocable by re-sealing without rotating the operator's whole identity. Device keys follow the custody model (§3.1): derived from the org key or enrolled raw, per org-admin policy.
 
 ## 5. CLI — `cw cred`
 
@@ -77,7 +89,7 @@ cw cred sync                    ← git pull --rebase + push
 cw cred qr <image|--screen>     ← decode a TOTP QR (zbar) → otpauth entry
 ```
 
-`show`/`otp` decrypt with the local device key; `sync` is plain git against cairn. No daemon, no server — the lazy-connection principle holds.
+`show`/`otp` decrypt with the local device key under the §3.1 session model — activation opens the org-TTL window (default 2 min) rather than holding the key open; `sync` is plain git against cairn. No daemon, no server — the lazy-connection principle holds.
 
 ## 6. Clients (thin layers, in build order)
 
@@ -114,9 +126,9 @@ TOTP seeds ingest like any secret; custodian minting codes at use-time is what m
 
 ## 10. Open questions
 
-- **Name** — `satchel` is a placeholder in the porter/casket naming style; operator to confirm.
+- **Name** — `satchel`, confirmed (2026-06-11).
 - **Multi-recipient envelope home** — casket-go first, then ports to casket-ts/-dotnet as needed; wire format must be cross-language like the channel format.
-- **Operator device-key derivation** — herald-rooted derive vs enrolled raw device keys; tracks the owner-seed-custody decision in the security design (§9), not blocking for M1 (raw enrolled keys work day one).
+- **Operator device-key derivation** — resolved by §3.1 (org-derived or enrolled, org-admin policy); raw enrolled keys remain the day-one M1 path.
 - **Non-tailnet git access** — cairn is reachable on the tailnet; a future phone client either joins the tailnet or needs an interchange-edge route. Deferred with M4.
 
 ## 11. Relationships
