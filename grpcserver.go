@@ -22,7 +22,8 @@ func NewCredentialServer(svc *Service) *credentialServer { return &credentialSer
 
 // Fetch returns the decrypted credential bundle for (kind, name). Requires
 // cred:read. Every call is audited — the store audits success/miss, and this
-// handler audits a scope denial.
+// handler audits a scope denial. Dispatches on kind: "git" → GitBundle,
+// "oauth" → OAuthBundle.
 func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*cwbv1.FetchResponse, error) {
 	claims, scopes, ok := identityFromMD(ctx)
 	if !ok {
@@ -32,22 +33,44 @@ func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*c
 		s.svc.AuditDenied(ctx, claims, r.GetKind(), r.GetName(), "missing scope "+scopeCredRead)
 		return nil, status.Error(codes.PermissionDenied, "missing scope "+scopeCredRead)
 	}
-	gb, meta, err := s.svc.Fetch(ContextWithAuth(ctx, claims), r.GetKind(), r.GetName())
-	if err != nil {
-		return nil, toStatus(err)
+	authCtx := ContextWithAuth(ctx, claims)
+	switch r.GetKind() {
+	case KindOAuth:
+		ob, meta, err := s.svc.FetchOAuth(authCtx, r.GetKind(), r.GetName())
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &cwbv1.FetchResponse{
+			Kind: meta.Kind,
+			Name: meta.Name,
+			Bundle: &cwbv1.FetchResponse_OauthBundle{OauthBundle: &cwbv1.OAuthBundle{
+				ClientId:     ob.ClientID,
+				ClientSecret: ob.ClientSecret,
+				RefreshToken: ob.RefreshToken,
+				TokenUri:     ob.TokenURI,
+				Scope:        ob.Scope,
+			}},
+		}, nil
+	default:
+		gb, meta, err := s.svc.Fetch(authCtx, r.GetKind(), r.GetName())
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &cwbv1.FetchResponse{
+			Kind: meta.Kind,
+			Name: meta.Name,
+			Bundle: &cwbv1.FetchResponse_GitBundle{GitBundle: &cwbv1.GitBundle{
+				Username: gb.Username,
+				Password: gb.Password,
+				Host:     gb.Host,
+			}},
+		}, nil
 	}
-	return &cwbv1.FetchResponse{
-		Kind: meta.Kind,
-		Name: meta.Name,
-		Bundle: &cwbv1.FetchResponse_GitBundle{GitBundle: &cwbv1.GitBundle{
-			Username: gb.Username,
-			Password: gb.Password,
-			Host:     gb.Host,
-		}},
-	}, nil
 }
 
 // SetCredential seals and stores a credential bundle. Requires cred:write.
+// Dispatches on kind: "oauth" → SetOAuthCredential, default → SetCredential
+// (git). The bundle field in the request must match the kind.
 func (s *credentialServer) SetCredential(ctx context.Context, r *cwbv1.SetCredentialRequest) (*cwbv1.SetCredentialResponse, error) {
 	claims, scopes, ok := identityFromMD(ctx)
 	if !ok {
@@ -57,19 +80,39 @@ func (s *credentialServer) SetCredential(ctx context.Context, r *cwbv1.SetCreden
 		s.svc.AuditDenied(ctx, claims, r.GetKind(), r.GetName(), "missing scope "+scopeCredWrite)
 		return nil, status.Error(codes.PermissionDenied, "missing scope "+scopeCredWrite)
 	}
-	pgb := r.GetGitBundle()
-	if pgb == nil {
-		return nil, status.Error(codes.InvalidArgument, "git_bundle is required")
+	authCtx := ContextWithAuth(ctx, claims)
+	switch r.GetKind() {
+	case KindOAuth:
+		pob := r.GetOauthBundle()
+		if pob == nil {
+			return nil, status.Error(codes.InvalidArgument, "oauth_bundle is required for kind=oauth")
+		}
+		m, err := s.svc.SetOAuthCredential(authCtx, r.GetKind(), r.GetName(), OAuthBundle{
+			ClientID:     pob.GetClientId(),
+			ClientSecret: pob.GetClientSecret(),
+			RefreshToken: pob.GetRefreshToken(),
+			TokenURI:     pob.GetTokenUri(),
+			Scope:        pob.GetScope(),
+		})
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &cwbv1.SetCredentialResponse{Item: toProtoMeta(m)}, nil
+	default:
+		pgb := r.GetGitBundle()
+		if pgb == nil {
+			return nil, status.Error(codes.InvalidArgument, "git_bundle is required")
+		}
+		m, err := s.svc.SetCredential(authCtx, r.GetKind(), r.GetName(), GitBundle{
+			Username: pgb.GetUsername(),
+			Password: pgb.GetPassword(),
+			Host:     pgb.GetHost(),
+		})
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &cwbv1.SetCredentialResponse{Item: toProtoMeta(m)}, nil
 	}
-	m, err := s.svc.SetCredential(ContextWithAuth(ctx, claims), r.GetKind(), r.GetName(), GitBundle{
-		Username: pgb.GetUsername(),
-		Password: pgb.GetPassword(),
-		Host:     pgb.GetHost(),
-	})
-	if err != nil {
-		return nil, toStatus(err)
-	}
-	return &cwbv1.SetCredentialResponse{Item: toProtoMeta(m)}, nil
 }
 
 // ListCredentials lists credential metadata — never secret material. Requires

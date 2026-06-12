@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/CarriedWorldUniverse/casket-go v0.1.1-0.20260529173942-b7b370a1a799
-	github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260611212122-c2fe7a68f6af
+	github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260612052157-11f4e54d318f
 	github.com/ncruces/go-sqlite3 v0.34.1
 	golang.org/x/crypto v0.53.0
 	google.golang.org/grpc v1.81.1
