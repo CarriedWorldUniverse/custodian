@@ -1,27 +1,42 @@
 // Command custodian is the CWB external-credential vault gRPC service. It runs
-// behind interchange-gateway over mTLS; identity comes from cwb-* gRPC metadata
-// injected by the gateway.
+// behind interchange-gateway over mTLS.
 //
 // Config (env):
 //
-//	CUSTODIAN_GRPC_ADDR    listen address (default :8085)
-//	CUSTODIAN_DB           sqlite path (default /var/lib/cwb/custodian.db)
-//	CUSTODIAN_ORG_SEED     base64 org base seed (single-org dev/deploy; see seed.go)
-//	CUSTODIAN_TLS_CERT     path to server TLS certificate (PEM)
-//	CUSTODIAN_TLS_KEY      path to server TLS private key (PEM)
-//	CUSTODIAN_TLS_CA       path to client CA certificate (PEM) for mTLS
-//	CUSTODIAN_DEV_INSECURE set to "1" to skip mTLS / allow an ephemeral seed (local dev only)
+//	CUSTODIAN_GRPC_ADDR       listen address (default :8085)
+//	CUSTODIAN_DB              sqlite path (default /var/lib/cwb/custodian.db)
+//	CUSTODIAN_ORG_SEED        base64 org base seed (single-org dev/deploy; see seed.go)
+//	CUSTODIAN_TLS_CERT        path to server TLS certificate (PEM)
+//	CUSTODIAN_TLS_KEY         path to server TLS private key (PEM)
+//	CUSTODIAN_TLS_CA          path to client CA certificate (PEM) for mTLS
+//	CUSTODIAN_DEV_INSECURE    set to "1" to skip mTLS / allow an ephemeral seed (local dev only)
+//	CUSTODIAN_IDENT_MODE      "metadata" (default, legacy: identity comes from
+//	                          self-asserted cwb-* gRPC metadata the gateway
+//	                          injects) or "cert" (identity is derived from the
+//	                          verified mTLS peer certificate's Common Name and
+//	                          cross-checked against CUSTODIAN_GRANTS; set "metadata"
+//	                          to roll back to the legacy trust model)
+//	CUSTODIAN_GRANTS          cert-mode grant table, see authz.ParseGrants for
+//	                          syntax; a malformed value is FATAL at startup
+//	                          (fail closed). Ignored in metadata mode. Empty is
+//	                          legal in cert mode (only trusted proxies can act).
+//	CUSTODIAN_TRUSTED_PROXIES comma-separated peer Common Names, in cert mode,
+//	                          whose asserted cwb-* metadata is trusted as-is
+//	                          (e.g. gateways acting on behalf of other callers).
+//	                          Default "interchange,nexus-broker" when unset.
 package main
 
 import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"log"
 	"net"
 	"os"
 
 	"github.com/CarriedWorldUniverse/custodian"
+	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -33,6 +48,11 @@ func main() {
 	addr := env("CUSTODIAN_GRPC_ADDR", ":8085")
 	dbPath := env("CUSTODIAN_DB", "/var/lib/cwb/custodian.db")
 
+	authzCfg, err := loadAuthzConfig()
+	if err != nil {
+		log.Fatalf("custodian: %v", err)
+	}
+
 	svc, err := custodian.New(context.Background(), custodian.Config{
 		DBPath: dbPath,
 	})
@@ -42,7 +62,7 @@ func main() {
 	defer svc.Close()
 
 	grpcSrv := grpc.NewServer(serverOptions()...)
-	cwbv1.RegisterCredentialServiceServer(grpcSrv, custodian.NewCredentialServer(svc))
+	cwbv1.RegisterCredentialServiceServer(grpcSrv, custodian.NewCredentialServer(svc, authzCfg))
 
 	healthSrv := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
@@ -93,6 +113,28 @@ func serverOptions() []grpc.ServerOption {
 		MinVersion:   tls.VersionTLS13,
 	}
 	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}
+}
+
+// loadAuthzConfig builds the authz.Config from CUSTODIAN_IDENT_MODE /
+// CUSTODIAN_GRANTS / CUSTODIAN_TRUSTED_PROXIES. Factored out of main so
+// startup config validation (in particular, that a malformed CUSTODIAN_GRANTS
+// is fatal — fail closed) is directly testable. Any returned error is fatal
+// at startup.
+func loadAuthzConfig() (authz.Config, error) {
+	mode := env("CUSTODIAN_IDENT_MODE", "metadata")
+	if mode != "metadata" && mode != "cert" {
+		return authz.Config{}, fmt.Errorf("invalid CUSTODIAN_IDENT_MODE %q (want %q or %q)", mode, "metadata", "cert")
+	}
+
+	grants, err := authz.ParseGrants(os.Getenv("CUSTODIAN_GRANTS"))
+	if err != nil {
+		return authz.Config{}, fmt.Errorf("parse CUSTODIAN_GRANTS: %w", err)
+	}
+
+	proxiesRaw := env("CUSTODIAN_TRUSTED_PROXIES", "interchange,nexus-broker")
+	proxies := authz.ParseProxies(proxiesRaw)
+
+	return authz.Config{Mode: mode, Grants: grants, TrustedProxies: proxies}, nil
 }
 
 func env(key, def string) string {

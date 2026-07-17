@@ -4,30 +4,68 @@ import (
 	"context"
 	"errors"
 
+	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// credentialServer implements cwbv1.CredentialServiceServer. Identity comes
-// from the cwb-* gRPC metadata; the org is taken only from there. Scopes:
+// credentialServer implements cwbv1.CredentialServiceServer. Identity is
+// derived via authz.Identify per authzCfg — "metadata" mode trusts the cwb-*
+// gRPC metadata interchange injects (legacy); "cert" mode derives it from
+// the verified mTLS peer certificate and cross-checks any asserted metadata
+// against a grant table (see mdident.go / cwb-proto/authz). The org is
+// always taken from the derived claims, never the request body. Scopes:
 // cred:read gates Fetch/List, cred:write gates SetCredential.
 type credentialServer struct {
 	cwbv1.UnimplementedCredentialServiceServer
-	svc *Service
+	svc      *Service
+	authzCfg authz.Config
 }
 
-// NewCredentialServer wraps svc in the gRPC credential service implementation.
-func NewCredentialServer(svc *Service) *credentialServer { return &credentialServer{svc: svc} }
+// NewCredentialServer wraps svc in the gRPC credential service implementation,
+// deriving caller identity per authzCfg (see authz.Config).
+func NewCredentialServer(svc *Service, authzCfg authz.Config) *credentialServer {
+	return &credentialServer{svc: svc, authzCfg: authzCfg}
+}
+
+// identify derives the caller's AuthClaims + scopes for the given request
+// (kind/name only used for denial-audit attribution). On failure it audits
+// mismatch/unknown-identity denials (attributed to the cert-derived peer
+// identity, never the unproven metadata) and returns a ready-to-return gRPC
+// status error; a missing/absent identity (metadata mode with no cwb-*
+// headers, or cert mode with no peer cert) is Unauthenticated with no audit
+// row, matching the legacy identityFromMD(ctx) !ok behavior.
+func (s *credentialServer) identify(ctx context.Context, kind, name string) (*AuthClaims, []string, error) {
+	claims, scopes, err := authz.Identify(ctx, s.authzCfg)
+	if err == nil {
+		return &AuthClaims{Sub: claims.Sub, Org: claims.Org}, scopes, nil
+	}
+
+	switch {
+	case errors.Is(err, authz.ErrMismatch):
+		reason := "ident-mismatch"
+		if extra := claimedMDSummary(ctx); extra != "" {
+			reason += ": claimed " + extra
+		}
+		s.svc.AuditDenied(ctx, &AuthClaims{Sub: peerCommonName(ctx), Org: requestedOrgMD(ctx)}, kind, name, reason)
+		return nil, nil, status.Error(codes.PermissionDenied, "identity denied")
+	case errors.Is(err, authz.ErrUnknownIdentity):
+		s.svc.AuditDenied(ctx, &AuthClaims{Sub: peerCommonName(ctx), Org: requestedOrgMD(ctx)}, kind, name, "unknown-identity")
+		return nil, nil, status.Error(codes.PermissionDenied, "identity denied")
+	default: // ErrNoPeerCert, ErrNoIdentity, ErrBadMode
+		return nil, nil, status.Error(codes.Unauthenticated, "missing identity")
+	}
+}
 
 // Fetch returns the decrypted credential bundle for (kind, name). Requires
 // cred:read. Every call is audited — the store audits success/miss, and this
 // handler audits a scope denial. Dispatches on kind: "git" → GitBundle,
 // "oauth" → OAuthBundle, "secret" → SecretBundle.
 func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*cwbv1.FetchResponse, error) {
-	claims, scopes, ok := identityFromMD(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, "missing identity")
+	claims, scopes, err := s.identify(ctx, r.GetKind(), r.GetName())
+	if err != nil {
+		return nil, err
 	}
 	if !hasScope(scopes, scopeCredRead) {
 		s.svc.AuditDenied(ctx, claims, r.GetKind(), r.GetName(), "missing scope "+scopeCredRead)
@@ -87,9 +125,9 @@ func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*c
 // SetSecretCredential, default → SetCredential (git). The bundle field in the
 // request must match the kind.
 func (s *credentialServer) SetCredential(ctx context.Context, r *cwbv1.SetCredentialRequest) (*cwbv1.SetCredentialResponse, error) {
-	claims, scopes, ok := identityFromMD(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, "missing identity")
+	claims, scopes, err := s.identify(ctx, r.GetKind(), r.GetName())
+	if err != nil {
+		return nil, err
 	}
 	if !hasScope(scopes, scopeCredWrite) {
 		s.svc.AuditDenied(ctx, claims, r.GetKind(), r.GetName(), "missing scope "+scopeCredWrite)
@@ -147,9 +185,9 @@ func (s *credentialServer) SetCredential(ctx context.Context, r *cwbv1.SetCreden
 // ListCredentials lists credential metadata — never secret material. Requires
 // cred:read.
 func (s *credentialServer) ListCredentials(ctx context.Context, r *cwbv1.ListCredentialsRequest) (*cwbv1.ListCredentialsResponse, error) {
-	claims, scopes, ok := identityFromMD(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, "missing identity")
+	claims, scopes, err := s.identify(ctx, r.GetKind(), "")
+	if err != nil {
+		return nil, err
 	}
 	if !hasScope(scopes, scopeCredRead) {
 		s.svc.AuditDenied(ctx, claims, r.GetKind(), "", "missing scope "+scopeCredRead)
@@ -170,9 +208,9 @@ func (s *credentialServer) ListCredentials(ctx context.Context, r *cwbv1.ListCre
 // org. Requires cred:write. Idempotent: a missing row returns deleted=false,
 // not an error.
 func (s *credentialServer) DeleteCredential(ctx context.Context, r *cwbv1.DeleteCredentialRequest) (*cwbv1.DeleteCredentialResponse, error) {
-	claims, scopes, ok := identityFromMD(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, "missing identity")
+	claims, scopes, err := s.identify(ctx, r.GetKind(), r.GetName())
+	if err != nil {
+		return nil, err
 	}
 	if !hasScope(scopes, scopeCredWrite) {
 		s.svc.AuditDenied(ctx, claims, r.GetKind(), r.GetName(), "missing scope "+scopeCredWrite)

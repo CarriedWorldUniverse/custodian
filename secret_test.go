@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc/codes"
 )
@@ -109,7 +110,7 @@ func TestSecretListIncludesSecretKind(t *testing.T) {
 // TestGRPCSecretSetFetch — gRPC Fetch returns the secret bundle for kind=secret.
 func TestGRPCSecretSetFetch(t *testing.T) {
 	svc := newTestService(t)
-	srv := NewCredentialServer(svc)
+	srv := NewCredentialServer(svc, authz.Config{Mode: "metadata"})
 
 	setReq := &cwbv1.SetCredentialRequest{
 		Kind: "secret",
@@ -146,7 +147,7 @@ func TestGRPCSecretSetFetch(t *testing.T) {
 // TestGRPCSecretMissingBundle — SetCredential with kind=secret but no
 // secret_bundle → InvalidArgument.
 func TestGRPCSecretMissingBundle(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	req := &cwbv1.SetCredentialRequest{Kind: "secret", Name: "svc"}
 	if _, err := srv.SetCredential(mdCtx("orgA", "shadow", "cred:write"), req); codeOf(err) != codes.InvalidArgument {
 		t.Fatalf("Set secret with no bundle: want InvalidArgument, got %v", err)
@@ -157,7 +158,7 @@ func TestGRPCSecretMissingBundle(t *testing.T) {
 // (instead of secret_bundle) is rejected as InvalidArgument, not silently
 // accepted or misrouted.
 func TestGRPCSecretKindGitBundleMismatch(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	req := &cwbv1.SetCredentialRequest{
 		Kind: "secret", Name: "svc",
 		Bundle: &cwbv1.SetCredentialRequest_GitBundle{GitBundle: &cwbv1.GitBundle{
@@ -173,7 +174,7 @@ func TestGRPCSecretKindGitBundleMismatch(t *testing.T) {
 // secret_bundle arm (instead of git_bundle) is rejected as InvalidArgument.
 // Symmetric to TestGRPCSecretKindGitBundleMismatch.
 func TestGRPCGitKindSecretBundleMismatch(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	req := &cwbv1.SetCredentialRequest{
 		Kind: "git", Name: "github.com",
 		Bundle: &cwbv1.SetCredentialRequest_SecretBundle{SecretBundle: &cwbv1.SecretBundle{
@@ -187,7 +188,7 @@ func TestGRPCGitKindSecretBundleMismatch(t *testing.T) {
 
 // TestGRPCSecretValidationPropagated — validation failures surface as InvalidArgument.
 func TestGRPCSecretValidationPropagated(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	req := &cwbv1.SetCredentialRequest{
 		Kind: "secret", Name: "svc",
 		Bundle: &cwbv1.SetCredentialRequest_SecretBundle{SecretBundle: &cwbv1.SecretBundle{
@@ -205,7 +206,7 @@ func TestGRPCSecretValidationPropagated(t *testing.T) {
 // row: action="delete", reason="" (hit).
 func TestDeleteCredentialExisting(t *testing.T) {
 	svc := newTestService(t)
-	srv := NewCredentialServer(svc)
+	srv := NewCredentialServer(svc, authz.Config{Mode: "metadata"})
 
 	setReq := &cwbv1.SetCredentialRequest{
 		Kind: "secret", Name: "svc",
@@ -241,7 +242,7 @@ func TestDeleteCredentialExisting(t *testing.T) {
 // reason="not-found" (mirrors the Fetch-miss convention).
 func TestDeleteCredentialMissing(t *testing.T) {
 	svc := newTestService(t)
-	srv := NewCredentialServer(svc)
+	srv := NewCredentialServer(svc, authz.Config{Mode: "metadata"})
 
 	resp, err := srv.DeleteCredential(mdCtx("orgA", "shadow", "cred:write"), &cwbv1.DeleteCredentialRequest{
 		Kind: "secret", Name: "nope",
@@ -264,7 +265,7 @@ func TestDeleteCredentialMissing(t *testing.T) {
 // cred:write is denied.
 func TestDeleteCredentialRequiresWriteScope(t *testing.T) {
 	svc := newTestService(t)
-	srv := NewCredentialServer(svc)
+	srv := NewCredentialServer(svc, authz.Config{Mode: "metadata"})
 
 	if _, err := srv.DeleteCredential(mdCtx("orgA", "shadow", "cred:read"), &cwbv1.DeleteCredentialRequest{
 		Kind: "secret", Name: "svc",
@@ -276,7 +277,7 @@ func TestDeleteCredentialRequiresWriteScope(t *testing.T) {
 // TestDeleteCredentialMissingIdentity — DeleteCredential without identity is
 // Unauthenticated.
 func TestDeleteCredentialMissingIdentity(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	if _, err := srv.DeleteCredential(context.Background(), &cwbv1.DeleteCredentialRequest{
 		Kind: "secret", Name: "svc",
 	}); codeOf(err) != codes.Unauthenticated {

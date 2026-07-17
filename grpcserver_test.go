@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -23,7 +24,7 @@ func mdCtx(org, sub, scopes string) context.Context {
 func codeOf(err error) codes.Code { return status.Code(err) }
 
 func TestGRPCMissingIdentity(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	if _, err := srv.Fetch(context.Background(), &cwbv1.FetchRequest{Kind: "git", Name: "github.com"}); codeOf(err) != codes.Unauthenticated {
 		t.Fatalf("Fetch w/o identity: want Unauthenticated, got %v", err)
 	}
@@ -35,7 +36,7 @@ func TestGRPCMissingIdentity(t *testing.T) {
 // TestScopeMatrix — Fetch requires cred:read, SetCredential requires cred:write.
 func TestScopeMatrix(t *testing.T) {
 	svc := newTestService(t)
-	srv := NewCredentialServer(svc)
+	srv := NewCredentialServer(svc, authz.Config{Mode: "metadata"})
 
 	setReq := &cwbv1.SetCredentialRequest{
 		Kind: "git", Name: "github.com",
@@ -77,7 +78,7 @@ func TestScopeMatrix(t *testing.T) {
 
 // TestAdminWriteSuperset — admin:write satisfies both cred lanes.
 func TestAdminWriteSuperset(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	setReq := &cwbv1.SetCredentialRequest{
 		Kind: "git", Name: "github.com",
 		Bundle: &cwbv1.SetCredentialRequest_GitBundle{GitBundle: &cwbv1.GitBundle{Username: "u", Password: "p", Host: "github.com"}},
@@ -92,7 +93,7 @@ func TestAdminWriteSuperset(t *testing.T) {
 
 // TestGRPCOrgIsolation — orgB (cred:read) cannot read orgA's credential.
 func TestGRPCOrgIsolation(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	setReq := &cwbv1.SetCredentialRequest{
 		Kind: "git", Name: "github.com",
 		Bundle: &cwbv1.SetCredentialRequest_GitBundle{GitBundle: &cwbv1.GitBundle{Username: "u", Password: "p", Host: "github.com"}},
@@ -107,7 +108,7 @@ func TestGRPCOrgIsolation(t *testing.T) {
 
 // TestListScopeGate — List requires cred:read.
 func TestListScopeGate(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	if _, err := srv.ListCredentials(mdCtx("orgA", "x", "cred:write"), &cwbv1.ListCredentialsRequest{}); codeOf(err) != codes.PermissionDenied {
 		t.Fatalf("List without cred:read: want PermissionDenied, got %v", err)
 	}

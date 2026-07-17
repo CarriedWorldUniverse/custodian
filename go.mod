@@ -21,3 +21,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260523011958-0a33c5d7ca68 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+// TEMPORARY scaffolding: authz lib not yet merged into cwb-proto. Re-pinned
+// to a released cwb-proto version at assembly time.
+replace github.com/CarriedWorldUniverse/cwb-proto => /home/operator/work/pipeline/cwb-proto-authz

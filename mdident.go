@@ -4,36 +4,10 @@ import (
 	"context"
 	"strings"
 
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 )
-
-// identityFromMD reads the cwb-* gRPC metadata keys injected by interchange and
-// returns AuthClaims + scopes. Returns (nil, nil, false) if either cwb-subject
-// or cwb-org is absent (the gateway always sets both for authed requests; their
-// absence means the request didn't transit the gateway). The org is taken ONLY
-// from here — never from a request body — so org isolation can't be bypassed
-// by a crafted payload.
-func identityFromMD(ctx context.Context) (claims *AuthClaims, scopes []string, ok bool) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, nil, false
-	}
-	get := func(k string) string {
-		v := md.Get(k)
-		if len(v) == 0 {
-			return ""
-		}
-		return v[0]
-	}
-	sub := get("cwb-subject")
-	org := get("cwb-org")
-	if sub == "" || org == "" {
-		return nil, nil, false
-	}
-	c := &AuthClaims{Sub: sub, Org: org}
-	sc := strings.Fields(get("cwb-scopes"))
-	return c, sc, true
-}
 
 // custodian scope vocabulary.
 //
@@ -58,4 +32,61 @@ func hasScope(have []string, need string) bool {
 		}
 	}
 	return false
+}
+
+// peerCommonName returns the verified peer TLS client certificate's Common
+// Name, or "" if unavailable (no peer, no TLS, or no verified chain). Used
+// only to attribute denial audit rows to the cert-derived identity — never
+// to authorize a request (that's authz.Identify's job).
+func peerCommonName(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return ""
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return ""
+	}
+	chains := tlsInfo.State.VerifiedChains
+	if len(chains) == 0 || len(chains[0]) == 0 {
+		return ""
+	}
+	return chains[0][0].Subject.CommonName
+}
+
+// requestedOrgMD returns the cwb-org value asserted in ctx's incoming
+// metadata, or "" if absent. Used for audit attribution on identity denials
+// — never trusted for authorization.
+func requestedOrgMD(ctx context.Context) string {
+	md, _ := metadata.FromIncomingContext(ctx)
+	v := md.Get("cwb-org")
+	if len(v) == 0 {
+		return ""
+	}
+	return v[0]
+}
+
+// claimedMDSummary renders a short, secret-free summary of the cwb-subject/
+// cwb-org/cwb-scopes metadata a caller asserted, for inclusion in a denial
+// audit reason (e.g. "sub=anvil org=testorg").
+func claimedMDSummary(ctx context.Context) string {
+	md, _ := metadata.FromIncomingContext(ctx)
+	get := func(k string) string {
+		v := md.Get(k)
+		if len(v) == 0 {
+			return ""
+		}
+		return v[0]
+	}
+	var parts []string
+	if v := get("cwb-subject"); v != "" {
+		parts = append(parts, "sub="+v)
+	}
+	if v := get("cwb-org"); v != "" {
+		parts = append(parts, "org="+v)
+	}
+	if v := get("cwb-scopes"); v != "" {
+		parts = append(parts, "scopes="+v)
+	}
+	return strings.Join(parts, " ")
 }
