@@ -79,5 +79,11 @@ func claimedMDSummary(ctx context.Context) string {
 	if v := get("cwb-scopes"); v != "" {
 		parts = append(parts, "scopes="+v)
 	}
-	return strings.Join(parts, " ")
+	// Caller-supplied values; cap the summary so a hostile client can't bloat
+	// audit rows (gRPC caps headers anyway — this is table hygiene).
+	s := strings.Join(parts, " ")
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return s
 }
