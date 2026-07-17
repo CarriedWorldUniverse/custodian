@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc/codes"
 )
@@ -173,7 +174,7 @@ func TestOAuthListIncludesOAuthKind(t *testing.T) {
 // TestGRPCOAuthSetFetch — gRPC Fetch returns the oauth bundle for kind=oauth.
 func TestGRPCOAuthSetFetch(t *testing.T) {
 	svc := newTestService(t)
-	srv := NewCredentialServer(svc)
+	srv := NewCredentialServer(svc, authz.Config{Mode: "metadata"})
 
 	setReq := &cwbv1.SetCredentialRequest{
 		Kind: "oauth",
@@ -211,7 +212,7 @@ func TestGRPCOAuthSetFetch(t *testing.T) {
 
 // TestGRPCOAuthMissingBundle — SetCredential with kind=oauth but no oauth_bundle → InvalidArgument.
 func TestGRPCOAuthMissingBundle(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	req := &cwbv1.SetCredentialRequest{Kind: "oauth", Name: "svc"}
 	if _, err := srv.SetCredential(mdCtx("orgA", "shadow", "cred:write"), req); codeOf(err) != codes.InvalidArgument {
 		t.Fatalf("Set oauth with no bundle: want InvalidArgument, got %v", err)
@@ -220,7 +221,7 @@ func TestGRPCOAuthMissingBundle(t *testing.T) {
 
 // TestGRPCOAuthValidationPropagated — validation failures surface as InvalidArgument.
 func TestGRPCOAuthValidationPropagated(t *testing.T) {
-	srv := NewCredentialServer(newTestService(t))
+	srv := NewCredentialServer(newTestService(t), authz.Config{Mode: "metadata"})
 	req := &cwbv1.SetCredentialRequest{
 		Kind: "oauth", Name: "svc",
 		Bundle: &cwbv1.SetCredentialRequest_OauthBundle{OauthBundle: &cwbv1.OAuthBundle{
