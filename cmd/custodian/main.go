@@ -10,12 +10,14 @@
 //	CUSTODIAN_TLS_KEY         path to server TLS private key (PEM)
 //	CUSTODIAN_TLS_CA          path to client CA certificate (PEM) for mTLS
 //	CUSTODIAN_DEV_INSECURE    set to "1" to skip mTLS / allow an ephemeral seed (local dev only)
-//	CUSTODIAN_IDENT_MODE      "metadata" (default, legacy: identity comes from
-//	                          self-asserted cwb-* gRPC metadata the gateway
-//	                          injects) or "cert" (identity is derived from the
+//	CUSTODIAN_IDENT_MODE      "cert" (default: identity is derived from the
 //	                          verified mTLS peer certificate's Common Name and
-//	                          cross-checked against CUSTODIAN_GRANTS; set "metadata"
-//	                          to roll back to the legacy trust model)
+//	                          cross-checked against CUSTODIAN_GRANTS — fails
+//	                          CLOSED, so a missing/dropped env var never
+//	                          silently reopens the legacy hole) or "metadata"
+//	                          (legacy: identity comes from self-asserted cwb-*
+//	                          gRPC metadata the gateway injects; explicit
+//	                          opt-out/rollback only)
 //	CUSTODIAN_GRANTS          cert-mode grant table, see authz.ParseGrants for
 //	                          syntax; a malformed value is FATAL at startup
 //	                          (fail closed). Ignored in metadata mode. Empty is
@@ -34,6 +36,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 
 	"github.com/CarriedWorldUniverse/custodian"
 	"github.com/CarriedWorldUniverse/cwb-proto/authz"
@@ -52,6 +55,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("custodian: %v", err)
 	}
+	logAuthzConfig(authzCfg)
 
 	svc, err := custodian.New(context.Background(), custodian.Config{
 		DBPath: dbPath,
@@ -121,7 +125,14 @@ func serverOptions() []grpc.ServerOption {
 // is fatal — fail closed) is directly testable. Any returned error is fatal
 // at startup.
 func loadAuthzConfig() (authz.Config, error) {
-	mode := env("CUSTODIAN_IDENT_MODE", "metadata")
+	// Default "cert", not "metadata": the deploy manifest sets this
+	// explicitly, so the binary default only matters when the env var is
+	// missing (dropped manifest field, refactor, local run, ...) — and it
+	// must fail CLOSED (cert mode, empty grants ⇒ only trusted proxies can
+	// act) rather than silently falling back to the legacy self-asserted
+	// metadata trust model NEX-774 closed. "metadata" remains available as
+	// an explicit rollback.
+	mode := env("CUSTODIAN_IDENT_MODE", "cert")
 	if mode != "metadata" && mode != "cert" {
 		return authz.Config{}, fmt.Errorf("invalid CUSTODIAN_IDENT_MODE %q (want %q or %q)", mode, "metadata", "cert")
 	}
@@ -135,6 +146,19 @@ func loadAuthzConfig() (authz.Config, error) {
 	proxies := authz.ParseProxies(proxiesRaw)
 
 	return authz.Config{Mode: mode, Grants: grants, TrustedProxies: proxies}, nil
+}
+
+// logAuthzConfig logs the resolved identity trust model at startup — mode,
+// grant count, and trusted-proxy Common Names (names only, never grant
+// contents/org/scope details) — so a metadata-mode boot (the legacy,
+// self-asserted trust model) is always visible in logs.
+func logAuthzConfig(cfg authz.Config) {
+	proxies := make([]string, 0, len(cfg.TrustedProxies))
+	for cn := range cfg.TrustedProxies {
+		proxies = append(proxies, cn)
+	}
+	sort.Strings(proxies)
+	log.Printf("custodian: identity mode=%s grants=%d trusted_proxies=%v", cfg.Mode, len(cfg.Grants), proxies)
 }
 
 func env(key, def string) string {

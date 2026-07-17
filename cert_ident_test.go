@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,6 +227,37 @@ func TestCertModeSubjectMismatch(t *testing.T) {
 	reason := auditReason(t, svc, "", "denied")
 	if !hasPrefix(reason, "ident-mismatch") {
 		t.Fatalf("want reason prefixed ident-mismatch, got %q", reason)
+	}
+}
+
+// TestCertModeSubjectMismatchQuotesClaimedValue — a crafted cwb-subject
+// containing a space and an embedded "key=value"-shaped token must land
+// %q-quoted in the audit reason, so it can't forge additional fake fields
+// in the human-read reason string.
+func TestCertModeSubjectMismatchQuotesClaimedValue(t *testing.T) {
+	ca := newCertTestCA(t)
+	cfg := authz.Config{Mode: "cert", Grants: certModeGrants(t)}
+	svc, dial := startCertModeServer(t, ca, cfg)
+	client := dialCertMode(t, ca, dial, ca.leaf(t, "croft", false))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const crafted = `evil org=carriedworld`
+	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("cwb-subject", crafted))
+
+	_, err := client.SetCredential(ctx, certModeSetReq("secret", "db-pass"))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("want PermissionDenied, got %v", err)
+	}
+	reason := auditReason(t, svc, "", "denied")
+	wantQuoted := `sub="evil org=carriedworld"`
+	if !strings.Contains(reason, wantQuoted) {
+		t.Fatalf("want reason to contain quoted claimed value %q, got %q", wantQuoted, reason)
+	}
+	// The unquoted form must not appear as a bare token (i.e. it must only
+	// show up inside the quotes).
+	if strings.Contains(reason, "sub=evil") {
+		t.Fatalf("claimed subject leaked unquoted into reason: %q", reason)
 	}
 }
 

@@ -2,7 +2,9 @@ package custodian
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	"google.golang.org/grpc/metadata"
@@ -59,7 +61,10 @@ func requestedOrgMD(ctx context.Context) string {
 
 // claimedMDSummary renders a short, secret-free summary of the cwb-subject/
 // cwb-org/cwb-scopes metadata a caller asserted, for inclusion in a denial
-// audit reason (e.g. "sub=anvil org=testorg").
+// audit reason (e.g. `sub="anvil" org="testorg"`). Values are %q-quoted —
+// they are caller-supplied and otherwise could inject fake-looking
+// "key=value" tokens (e.g. a subject of `evil org=carriedworld`) into the
+// human-read audit reason.
 func claimedMDSummary(ctx context.Context) string {
 	md, _ := metadata.FromIncomingContext(ctx)
 	get := func(k string) string {
@@ -71,19 +76,30 @@ func claimedMDSummary(ctx context.Context) string {
 	}
 	var parts []string
 	if v := get("cwb-subject"); v != "" {
-		parts = append(parts, "sub="+v)
+		parts = append(parts, fmt.Sprintf("sub=%q", v))
 	}
 	if v := get("cwb-org"); v != "" {
-		parts = append(parts, "org="+v)
+		parts = append(parts, fmt.Sprintf("org=%q", v))
 	}
 	if v := get("cwb-scopes"); v != "" {
-		parts = append(parts, "scopes="+v)
+		parts = append(parts, fmt.Sprintf("scopes=%q", v))
 	}
 	// Caller-supplied values; cap the summary so a hostile client can't bloat
-	// audit rows (gRPC caps headers anyway — this is table hygiene).
-	s := strings.Join(parts, " ")
-	if len(s) > 200 {
-		s = s[:200] + "…"
+	// audit rows (gRPC caps headers anyway — this is table hygiene). Truncate
+	// on a rune boundary so a multi-byte rune straddling the cutoff isn't split.
+	return truncateRunes(strings.Join(parts, " "), 200)
+}
+
+// truncateRunes returns s if it's at most n bytes, else the longest prefix
+// of s that is both <= n bytes and ends on a rune boundary, plus an
+// ellipsis marker.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	return s
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
