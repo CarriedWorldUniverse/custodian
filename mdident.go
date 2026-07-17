@@ -4,9 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"google.golang.org/grpc/credentials"
+	"github.com/CarriedWorldUniverse/cwb-proto/authz"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
 )
 
 // custodian scope vocabulary.
@@ -39,19 +38,11 @@ func hasScope(have []string, need string) bool {
 // only to attribute denial audit rows to the cert-derived identity — never
 // to authorize a request (that's authz.Identify's job).
 func peerCommonName(ctx context.Context) string {
-	p, ok := peer.FromContext(ctx)
-	if !ok || p.AuthInfo == nil {
+	cn, err := authz.PeerCommonName(ctx)
+	if err != nil {
 		return ""
 	}
-	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return ""
-	}
-	chains := tlsInfo.State.VerifiedChains
-	if len(chains) == 0 || len(chains[0]) == 0 {
-		return ""
-	}
-	return chains[0][0].Subject.CommonName
+	return cn
 }
 
 // requestedOrgMD returns the cwb-org value asserted in ctx's incoming
