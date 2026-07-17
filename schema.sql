@@ -27,15 +27,16 @@ CREATE TABLE IF NOT EXISTS credentials (
 CREATE INDEX IF NOT EXISTS idx_credentials_org ON credentials (org);
 
 -- credential_audit — append-only audit of every brokered credential use. Each
--- Fetch (success AND denial) and every Set writes a row; the brokered-use audit
--- trail is custodian's whole point. action is one of: fetch | set | denied.
+-- Fetch (success AND denial), every Set, and every Delete writes a row; the
+-- brokered-use audit trail is custodian's whole point. action is one of:
+-- fetch | set | delete | denied.
 CREATE TABLE IF NOT EXISTS credential_audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     org      TEXT NOT NULL,
     identity TEXT NOT NULL,
     kind     TEXT NOT NULL,
     name     TEXT NOT NULL,
-    action   TEXT NOT NULL, -- fetch | set | denied
+    action   TEXT NOT NULL, -- fetch | set | delete | denied
     reason   TEXT NOT NULL DEFAULT '',
     at       TEXT NOT NULL
 );
