@@ -21,8 +21,9 @@ var (
 
 // Supported credential kinds.
 const (
-	KindGit   = "git"   // GitBundle — username/password/host, keyed by git host
-	KindOAuth = "oauth" // OAuthBundle — client credentials + refresh token, keyed by logical service name
+	KindGit    = "git"    // GitBundle — username/password/host, keyed by git host
+	KindOAuth  = "oauth"  // OAuthBundle — client credentials + refresh token, keyed by logical service name
+	KindSecret = "secret" // SecretBundle — a single opaque secret + optional host/username hints
 )
 
 // GitBundle is a git push/fetch credential. password is a PAT or token and is
@@ -45,6 +46,15 @@ type OAuthBundle struct {
 	Scope        string `json:"scope,omitempty"`
 }
 
+// SecretBundle is a single opaque secret (API key, bearer token, webhook URL,
+// password, …) with optional non-secret hints. Value is secret material and is
+// never returned by List/metadata paths or logged — only by Fetch over mTLS.
+type SecretBundle struct {
+	Value    string `json:"value"`
+	Host     string `json:"host"`
+	Username string `json:"username"`
+}
+
 // CredentialMeta describes a stored credential without its secret material.
 type CredentialMeta struct {
 	Kind      string
@@ -62,15 +72,15 @@ var writeTxOpts = &sql.TxOptions{Isolation: sql.LevelSerializable}
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // normalize trims and validates a kind/name pair. Empty values are rejected.
-// Accepted kinds: "git", "oauth".
+// Accepted kinds: "git", "oauth", "secret".
 func normalize(kind, name string) (string, string, error) {
 	k := strings.TrimSpace(kind)
 	n := strings.TrimSpace(name)
 	if k == "" || n == "" {
 		return "", "", fmt.Errorf("%w: kind and name are required", ErrInvalid)
 	}
-	if k != KindGit && k != KindOAuth {
-		return "", "", fmt.Errorf("%w: %q (supported kinds: %q, %q)", ErrKindUnsup, k, KindGit, KindOAuth)
+	if k != KindGit && k != KindOAuth && k != KindSecret {
+		return "", "", fmt.Errorf("%w: %q (supported kinds: %q, %q, %q)", ErrKindUnsup, k, KindGit, KindOAuth, KindSecret)
 	}
 	return k, n, nil
 }
@@ -85,6 +95,14 @@ func validateOAuthBundle(b OAuthBundle) error {
 	}
 	if strings.TrimSpace(b.TokenURI) == "" {
 		return fmt.Errorf("%w: oauth bundle: token_uri is required", ErrInvalid)
+	}
+	return nil
+}
+
+// validateSecretBundle rejects bundles missing the secret value.
+func validateSecretBundle(b SecretBundle) error {
+	if strings.TrimSpace(b.Value) == "" {
+		return fmt.Errorf("%w: secret bundle: value is required", ErrInvalid)
 	}
 	return nil
 }
@@ -356,6 +374,164 @@ func (s *Service) FetchOAuth(ctx context.Context, kind, name string) (OAuthBundl
 	}
 	s.audit(ctx, claims, k, n, "fetch", "")
 	return ob, meta, nil
+}
+
+// SetSecretCredential seals a secret bundle and stores it for (org, kind, name).
+// kind must be "secret". Required bundle field: Value. Org comes from the auth
+// context — never a request field. Every set is audited.
+func (s *Service) SetSecretCredential(ctx context.Context, kind, name string, bundle SecretBundle) (*CredentialMeta, error) {
+	claims := AuthFromContext(ctx)
+	if claims == nil {
+		return nil, fmt.Errorf("custodian: SetSecretCredential: no auth in context")
+	}
+	k, n, err := normalize(kind, name)
+	if err != nil {
+		return nil, err
+	}
+	if k != KindSecret {
+		return nil, fmt.Errorf("%w: SetSecretCredential called with kind %q (want %q)", ErrInvalid, k, KindSecret)
+	}
+	if err := validateSecretBundle(bundle); err != nil {
+		return nil, err
+	}
+
+	plaintext, err := json.Marshal(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("custodian: SetSecretCredential: marshal bundle: %w", err)
+	}
+
+	seed, err := s.seeds.OrgSeed(ctx, claims.Org)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrNoSeed, err)
+	}
+	env, keyRef, err := sealCredential(seed, claims.Org, k, n, plaintext)
+	if err != nil {
+		return nil, err
+	}
+	now := nowRFC3339()
+	sealedB64 := base64.StdEncoding.EncodeToString(env)
+	keyRefB64 := base64.StdEncoding.EncodeToString(keyRef[:])
+
+	tx, err := s.db.BeginTx(ctx, writeTxOpts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var createdAt string
+	err = tx.QueryRowContext(ctx,
+		`SELECT created_at FROM credentials WHERE org = ? AND kind = ? AND name = ?`,
+		claims.Org, k, n).Scan(&createdAt)
+	switch {
+	case err == sql.ErrNoRows:
+		createdAt = now
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO credentials (org, kind, name, sealed_bundle_b64, keyref_b64, created_at, updated_at, writer)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			claims.Org, k, n, sealedB64, keyRefB64, createdAt, now, claims.Sub); err != nil {
+			return nil, err
+		}
+	case err != nil:
+		return nil, err
+	default:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE credentials SET sealed_bundle_b64 = ?, keyref_b64 = ?, updated_at = ?, writer = ?
+			 WHERE org = ? AND kind = ? AND name = ?`,
+			sealedB64, keyRefB64, now, claims.Sub, claims.Org, k, n); err != nil {
+			return nil, err
+		}
+	}
+	s.auditTx(ctx, tx, claims, k, n, "set", "")
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &CredentialMeta{
+		Kind: k, Name: n, CreatedAt: createdAt, UpdatedAt: now, Writer: claims.Sub,
+	}, nil
+}
+
+// FetchSecret loads, decrypts, and returns the secret bundle for (org, kind, name).
+// Every fetch is audited (the caller is expected to audit denials separately).
+// Org comes from the auth context.
+func (s *Service) FetchSecret(ctx context.Context, kind, name string) (SecretBundle, *CredentialMeta, error) {
+	claims := AuthFromContext(ctx)
+	if claims == nil {
+		return SecretBundle{}, nil, fmt.Errorf("custodian: FetchSecret: no auth in context")
+	}
+	k, n, err := normalize(kind, name)
+	if err != nil {
+		return SecretBundle{}, nil, err
+	}
+
+	var sealedB64 string
+	meta := &CredentialMeta{Kind: k, Name: n}
+	err = s.db.QueryRowContext(ctx,
+		`SELECT sealed_bundle_b64, created_at, updated_at, writer FROM credentials
+		 WHERE org = ? AND kind = ? AND name = ?`, claims.Org, k, n).
+		Scan(&sealedB64, &meta.CreatedAt, &meta.UpdatedAt, &meta.Writer)
+	if err == sql.ErrNoRows {
+		s.audit(ctx, claims, k, n, "denied", "not-found")
+		return SecretBundle{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return SecretBundle{}, nil, err
+	}
+	sealedBytes, err := base64.StdEncoding.DecodeString(sealedB64)
+	if err != nil {
+		return SecretBundle{}, nil, fmt.Errorf("custodian: FetchSecret: decode envelope: %w", err)
+	}
+	seed, err := s.seeds.OrgSeed(ctx, claims.Org)
+	if err != nil {
+		return SecretBundle{}, nil, fmt.Errorf("%w: %v", ErrNoSeed, err)
+	}
+	plaintext, err := openCredential(seed, claims.Org, k, n, sealedBytes)
+	if err != nil {
+		return SecretBundle{}, nil, err
+	}
+	var sb SecretBundle
+	if err := json.Unmarshal(plaintext, &sb); err != nil {
+		return SecretBundle{}, nil, fmt.Errorf("custodian: FetchSecret: unmarshal bundle: %w", err)
+	}
+	s.audit(ctx, claims, k, n, "fetch", "")
+	return sb, meta, nil
+}
+
+// DeleteCredential removes the credential at (org, kind, name). Idempotent: a
+// missing row returns (false, nil) — not an error. Org comes from the auth
+// context — never a request field. The delete is audited regardless of
+// whether a row was actually removed.
+func (s *Service) DeleteCredential(ctx context.Context, kind, name string) (bool, error) {
+	claims := AuthFromContext(ctx)
+	if claims == nil {
+		return false, fmt.Errorf("custodian: DeleteCredential: no auth in context")
+	}
+	k, n, err := normalize(kind, name)
+	if err != nil {
+		return false, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, writeTxOpts)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM credentials WHERE org = ? AND kind = ? AND name = ?`,
+		claims.Org, k, n)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	deleted := affected > 0
+	s.auditTx(ctx, tx, claims, k, n, "delete", "")
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return deleted, nil
 }
 
 // --- audit ---

@@ -23,7 +23,7 @@ func NewCredentialServer(svc *Service) *credentialServer { return &credentialSer
 // Fetch returns the decrypted credential bundle for (kind, name). Requires
 // cred:read. Every call is audited — the store audits success/miss, and this
 // handler audits a scope denial. Dispatches on kind: "git" → GitBundle,
-// "oauth" → OAuthBundle.
+// "oauth" → OAuthBundle, "secret" → SecretBundle.
 func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*cwbv1.FetchResponse, error) {
 	claims, scopes, ok := identityFromMD(ctx)
 	if !ok {
@@ -51,6 +51,20 @@ func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*c
 				Scope:        ob.Scope,
 			}},
 		}, nil
+	case KindSecret:
+		sb, meta, err := s.svc.FetchSecret(authCtx, r.GetKind(), r.GetName())
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &cwbv1.FetchResponse{
+			Kind: meta.Kind,
+			Name: meta.Name,
+			Bundle: &cwbv1.FetchResponse_SecretBundle{SecretBundle: &cwbv1.SecretBundle{
+				Value:    sb.Value,
+				Host:     sb.Host,
+				Username: sb.Username,
+			}},
+		}, nil
 	default:
 		gb, meta, err := s.svc.Fetch(authCtx, r.GetKind(), r.GetName())
 		if err != nil {
@@ -69,8 +83,9 @@ func (s *credentialServer) Fetch(ctx context.Context, r *cwbv1.FetchRequest) (*c
 }
 
 // SetCredential seals and stores a credential bundle. Requires cred:write.
-// Dispatches on kind: "oauth" → SetOAuthCredential, default → SetCredential
-// (git). The bundle field in the request must match the kind.
+// Dispatches on kind: "oauth" → SetOAuthCredential, "secret" →
+// SetSecretCredential, default → SetCredential (git). The bundle field in the
+// request must match the kind.
 func (s *credentialServer) SetCredential(ctx context.Context, r *cwbv1.SetCredentialRequest) (*cwbv1.SetCredentialResponse, error) {
 	claims, scopes, ok := identityFromMD(ctx)
 	if !ok {
@@ -93,6 +108,20 @@ func (s *credentialServer) SetCredential(ctx context.Context, r *cwbv1.SetCreden
 			RefreshToken: pob.GetRefreshToken(),
 			TokenURI:     pob.GetTokenUri(),
 			Scope:        pob.GetScope(),
+		})
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &cwbv1.SetCredentialResponse{Item: toProtoMeta(m)}, nil
+	case KindSecret:
+		psb := r.GetSecretBundle()
+		if psb == nil {
+			return nil, status.Error(codes.InvalidArgument, "secret_bundle is required for kind=secret")
+		}
+		m, err := s.svc.SetSecretCredential(authCtx, r.GetKind(), r.GetName(), SecretBundle{
+			Value:    psb.GetValue(),
+			Host:     psb.GetHost(),
+			Username: psb.GetUsername(),
 		})
 		if err != nil {
 			return nil, toStatus(err)
@@ -135,6 +164,25 @@ func (s *credentialServer) ListCredentials(ctx context.Context, r *cwbv1.ListCre
 		out = append(out, toProtoMeta(&metas[i]))
 	}
 	return &cwbv1.ListCredentialsResponse{Items: out}, nil
+}
+
+// DeleteCredential removes the credential for (kind, name) in the caller's
+// org. Requires cred:write. Idempotent: a missing row returns deleted=false,
+// not an error.
+func (s *credentialServer) DeleteCredential(ctx context.Context, r *cwbv1.DeleteCredentialRequest) (*cwbv1.DeleteCredentialResponse, error) {
+	claims, scopes, ok := identityFromMD(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "missing identity")
+	}
+	if !hasScope(scopes, scopeCredWrite) {
+		s.svc.AuditDenied(ctx, claims, r.GetKind(), r.GetName(), "missing scope "+scopeCredWrite)
+		return nil, status.Error(codes.PermissionDenied, "missing scope "+scopeCredWrite)
+	}
+	deleted, err := s.svc.DeleteCredential(ContextWithAuth(ctx, claims), r.GetKind(), r.GetName())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &cwbv1.DeleteCredentialResponse{Deleted: deleted}, nil
 }
 
 // toProtoMeta converts internal CredentialMeta to the wire type.

@@ -21,3 +21,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260523011958-0a33c5d7ca68 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace github.com/CarriedWorldUniverse/cwb-proto => /home/operator/src/cwb-proto
