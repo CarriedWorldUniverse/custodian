@@ -169,6 +169,22 @@ func TestGRPCSecretKindGitBundleMismatch(t *testing.T) {
 	}
 }
 
+// TestGRPCGitKindSecretBundleMismatch — the reverse: kind=git with a
+// secret_bundle arm (instead of git_bundle) is rejected as InvalidArgument.
+// Symmetric to TestGRPCSecretKindGitBundleMismatch.
+func TestGRPCGitKindSecretBundleMismatch(t *testing.T) {
+	srv := NewCredentialServer(newTestService(t))
+	req := &cwbv1.SetCredentialRequest{
+		Kind: "git", Name: "github.com",
+		Bundle: &cwbv1.SetCredentialRequest_SecretBundle{SecretBundle: &cwbv1.SecretBundle{
+			Value: "v",
+		}},
+	}
+	if _, err := srv.SetCredential(mdCtx("orgA", "shadow", "cred:write"), req); codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("Set git with secret_bundle arm: want InvalidArgument, got %v", err)
+	}
+}
+
 // TestGRPCSecretValidationPropagated — validation failures surface as InvalidArgument.
 func TestGRPCSecretValidationPropagated(t *testing.T) {
 	srv := NewCredentialServer(newTestService(t))
@@ -186,7 +202,7 @@ func TestGRPCSecretValidationPropagated(t *testing.T) {
 
 // TestDeleteCredentialExisting — deleting an existing credential returns
 // deleted=true and a subsequent Fetch is NotFound. Also verifies the audit
-// row.
+// row: action="delete", reason="" (hit).
 func TestDeleteCredentialExisting(t *testing.T) {
 	svc := newTestService(t)
 	srv := NewCredentialServer(svc)
@@ -215,10 +231,14 @@ func TestDeleteCredentialExisting(t *testing.T) {
 	if n := auditCount(t, svc, "orgA", "delete"); n != 1 {
 		t.Fatalf("want 1 delete audit row, got %d", n)
 	}
+	if got := auditReason(t, svc, "orgA", "delete"); got != "" {
+		t.Fatalf("hit delete: want reason=\"\", got %q", got)
+	}
 }
 
 // TestDeleteCredentialMissing — deleting a missing row returns deleted=false,
-// no error.
+// no error, and the audit row is distinguishable from a hit: action="delete",
+// reason="not-found" (mirrors the Fetch-miss convention).
 func TestDeleteCredentialMissing(t *testing.T) {
 	svc := newTestService(t)
 	srv := NewCredentialServer(svc)
@@ -231,6 +251,12 @@ func TestDeleteCredentialMissing(t *testing.T) {
 	}
 	if resp.GetDeleted() {
 		t.Fatal("want deleted=false for missing row")
+	}
+	if n := auditCount(t, svc, "orgA", "delete"); n != 1 {
+		t.Fatalf("want 1 delete audit row, got %d", n)
+	}
+	if got := auditReason(t, svc, "orgA", "delete"); got != "not-found" {
+		t.Fatalf("miss delete: want reason=\"not-found\", got %q", got)
 	}
 }
 

@@ -527,7 +527,11 @@ func (s *Service) DeleteCredential(ctx context.Context, kind, name string) (bool
 		return false, err
 	}
 	deleted := affected > 0
-	s.auditTx(ctx, tx, claims, k, n, "delete", "")
+	reason := ""
+	if !deleted {
+		reason = "not-found"
+	}
+	s.auditTx(ctx, tx, claims, k, n, "delete", reason)
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}

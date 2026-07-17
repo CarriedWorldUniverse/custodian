@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS credential_audit (
     identity TEXT NOT NULL,
     kind     TEXT NOT NULL,
     name     TEXT NOT NULL,
-    action   TEXT NOT NULL, -- fetch | set | denied
+    action   TEXT NOT NULL, -- fetch | set | delete | denied
     reason   TEXT NOT NULL DEFAULT '',
     at       TEXT NOT NULL
 );

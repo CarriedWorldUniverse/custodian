@@ -184,3 +184,17 @@ func auditCount(t *testing.T, svc *Service, org, action string) int {
 	}
 	return n
 }
+
+// auditReason returns the reason column of the most recent audit row for
+// (org, action) — callers use it to assert hit vs miss distinctions (e.g.
+// reason="not-found" on a Delete/Fetch miss).
+func auditReason(t *testing.T, svc *Service, org, action string) string {
+	t.Helper()
+	var reason string
+	if err := svc.db.QueryRow(
+		`SELECT reason FROM credential_audit WHERE org = ? AND action = ? ORDER BY id DESC LIMIT 1`, org, action).
+		Scan(&reason); err != nil {
+		t.Fatalf("audit reason: %v", err)
+	}
+	return reason
+}
